@@ -10,6 +10,7 @@ const multer = require('multer');
 const csv = require('csv-parser');
 const fs = require('fs');
 const bcrypt = require('bcryptjs');
+const { sendWelcomeEmail } = require('../utils/emailService');
 
 // Configure multer for file upload
 const upload = multer({ dest: 'uploads/' });
@@ -547,6 +548,7 @@ router.post('/students/import', auth, isFaculty, upload.single('file'), async (r
 
     const results = [];
     const errors = [];
+    const successfulImports = [];
 
     // Read CSV file
     fs.createReadStream(req.file.path)
@@ -556,24 +558,52 @@ router.post('/students/import', auth, isFaculty, upload.single('file'), async (r
         // Process each row
         for (const row of results) {
           try {
+            const email = row.email.toLowerCase();
+            const regNumber = row.regNumber.toString();
+            
             // Check if user already exists
-            const existingUser = await User.findOne({ email: row.email });
+            const existingUser = await User.findOne({
+              $or: [{ email }, { regNumber }]
+            });
+            
             if (existingUser) {
-              errors.push(`User with email ${row.email} already exists`);
+              errors.push(`User with email ${email} or registration number ${regNumber} already exists`);
               continue;
             }
 
-            // Create new user
-            const hashedPassword = await bcrypt.hash(row.regNumber, 10); // Using regNumber as initial password
-            const newUser = new User({
-              name: row.name,
-              email: row.email,
-              password: hashedPassword,
-              role: 'student',
-              regNumber: row.regNumber
+            // IMPORTANT: Hash the password before saving
+            const salt = await bcrypt.genSalt(8);
+            const hashedPassword = await bcrypt.hash(regNumber, salt);
+            console.log('Creating student with hashed password:', {
+              regNumber,
+              hashedPassword
             });
 
-            await newUser.save();
+            const newUser = new User({
+              name: row.name,
+              email,
+              regNumber,
+              password: hashedPassword, // Save the hashed password
+              role: 'student',
+              isVerified: true
+            });
+
+            await newUser.save({ validateBeforeSave: true });
+            console.log('Student imported successfully');
+            successfulImports.push(row);
+
+            // Send welcome email with original regNumber as password
+            try {
+              await sendWelcomeEmail({
+                name: row.name,
+                email,
+                regNumber,
+                password: regNumber, // Send original regNumber as password
+                loginUrl: process.env.FRONTEND_URL || 'http://localhost:5173'
+              });
+            } catch (emailError) {
+              console.error(`Failed to send welcome email to ${email}:`, emailError);
+            }
           } catch (error) {
             errors.push(`Error adding user ${row.email}: ${error.message}`);
           }
@@ -583,12 +613,15 @@ router.post('/students/import', auth, isFaculty, upload.single('file'), async (r
         fs.unlinkSync(req.file.path);
 
         res.json({
-          message: `Imported ${results.length - errors.length} students successfully`,
-          errors: errors.length > 0 ? errors : undefined
+          message: `Imported ${successfulImports.length} students successfully`,
+          errors
         });
       });
   } catch (error) {
     console.error('Error importing students:', error);
+    if (req.file) {
+      fs.unlinkSync(req.file.path);
+    }
     res.status(500).json({ message: 'Error importing students', error: error.message });
   }
 });
@@ -618,7 +651,7 @@ router.post('/students', auth, isFaculty, async (req, res) => {
 
     // Check if user already exists
     const existingUser = await User.findOne({ 
-      $or: [{ email }, { regNumber }] 
+      $or: [{ email: email.toLowerCase() }, { regNumber }] 
     });
     
     if (existingUser) {
@@ -627,17 +660,36 @@ router.post('/students', auth, isFaculty, async (req, res) => {
       });
     }
 
-    // Create new student
-    const hashedPassword = await bcrypt.hash(regNumber, 10);
+    // Create new student with registration number as initial password
+    const initialPassword = regNumber.toString();
+    console.log('Creating student with initial password:', initialPassword);
+
     const student = new User({
       name,
-      email,
+      email: email.toLowerCase(),
       regNumber,
-      password: hashedPassword,
-      role: 'student'
+      password: initialPassword,
+      role: 'student',
+      isVerified: true
     });
 
+    // Save the student and wait for the middleware to hash the password
     await student.save();
+    console.log('Student created with hashed password');
+    
+    // Send welcome email
+    try {
+      await sendWelcomeEmail({
+        name,
+        email: email.toLowerCase(),
+        regNumber,
+        password: initialPassword, // Send the plain text password in the email
+        loginUrl: process.env.FRONTEND_URL || 'http://localhost:5173'
+      });
+    } catch (emailError) {
+      console.error('Failed to send welcome email:', emailError);
+    }
+
     res.status(201).json({
       message: 'Student added successfully',
       student: {
@@ -650,6 +702,59 @@ router.post('/students', auth, isFaculty, async (req, res) => {
   } catch (error) {
     console.error('Error adding student:', error);
     res.status(500).json({ message: 'Error adding student' });
+  }
+});
+
+// Delete student
+router.delete('/students/:id', auth, isFaculty, async (req, res) => {
+  try {
+    const student = await User.findOneAndDelete({
+      _id: req.params.id,
+      role: 'student'
+    });
+    
+    if (!student) {
+      return res.status(404).json({ message: 'Student not found' });
+    }
+    
+    res.json({ message: 'Student deleted successfully' });
+  } catch (error) {
+    console.error('Error deleting student:', error);
+    res.status(500).json({ message: 'Error deleting student' });
+  }
+});
+
+// Update student
+router.put('/students/:id', auth, isFaculty, async (req, res) => {
+  try {
+    const { name, email, regNumber } = req.body;
+
+    // Check if email/regNumber is already in use by another student
+    const existingUser = await User.findOne({
+      $or: [{ email }, { regNumber }],
+      _id: { $ne: req.params.id }
+    });
+
+    if (existingUser) {
+      return res.status(400).json({
+        message: 'Email or registration number already in use'
+      });
+    }
+
+    const student = await User.findOneAndUpdate(
+      { _id: req.params.id, role: 'student' },
+      { name, email, regNumber },
+      { new: true }
+    ).select('-password');
+
+    if (!student) {
+      return res.status(404).json({ message: 'Student not found' });
+    }
+
+    res.json({ message: 'Student updated successfully', student });
+  } catch (error) {
+    console.error('Error updating student:', error);
+    res.status(500).json({ message: 'Error updating student' });
   }
 });
 
