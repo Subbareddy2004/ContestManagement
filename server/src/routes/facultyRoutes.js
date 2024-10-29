@@ -550,18 +550,16 @@ router.post('/students/import', auth, isFaculty, upload.single('file'), async (r
     const errors = [];
     const successfulImports = [];
 
-    // Read CSV file
     fs.createReadStream(req.file.path)
       .pipe(csv())
       .on('data', (data) => results.push(data))
       .on('end', async () => {
-        // Process each row
         for (const row of results) {
           try {
             const email = row.email.toLowerCase();
             const regNumber = row.regNumber.toString();
             
-            // Check if user already exists
+            // Check if user exists
             const existingUser = await User.findOne({
               $or: [{ email }, { regNumber }]
             });
@@ -571,34 +569,31 @@ router.post('/students/import', auth, isFaculty, upload.single('file'), async (r
               continue;
             }
 
-            // IMPORTANT: Hash the password before saving
-            const salt = await bcrypt.genSalt(8);
-            const hashedPassword = await bcrypt.hash(regNumber, salt);
-            console.log('Creating student with hashed password:', {
-              regNumber,
-              hashedPassword
-            });
-
+            // Create new student with registration number as password
             const newUser = new User({
               name: row.name,
               email,
               regNumber,
-              password: hashedPassword, // Save the hashed password
+              password: regNumber, // Let the pre-save middleware handle hashing
               role: 'student',
               isVerified: true
             });
 
-            await newUser.save({ validateBeforeSave: true });
-            console.log('Student imported successfully');
+            await newUser.save();
+            console.log('Student imported successfully:', {
+              email,
+              regNumber
+            });
+            
             successfulImports.push(row);
 
-            // Send welcome email with original regNumber as password
+            // Send welcome email
             try {
               await sendWelcomeEmail({
                 name: row.name,
                 email,
                 regNumber,
-                password: regNumber, // Send original regNumber as password
+                password: regNumber,
                 loginUrl: process.env.FRONTEND_URL || 'http://localhost:5173'
               });
             } catch (emailError) {
@@ -614,7 +609,7 @@ router.post('/students/import', auth, isFaculty, upload.single('file'), async (r
 
         res.json({
           message: `Imported ${successfulImports.length} students successfully`,
-          errors
+          errors: errors.length > 0 ? errors : undefined
         });
       });
   } catch (error) {
@@ -649,7 +644,7 @@ router.post('/students', auth, isFaculty, async (req, res) => {
       return res.status(400).json({ message: 'All fields are required' });
     }
 
-    // Check if user already exists
+    // Check if user exists
     const existingUser = await User.findOne({ 
       $or: [{ email: email.toLowerCase() }, { regNumber }] 
     });
@@ -660,22 +655,21 @@ router.post('/students', auth, isFaculty, async (req, res) => {
       });
     }
 
-    // Create new student with registration number as initial password
-    const initialPassword = regNumber.toString();
-    console.log('Creating student with initial password:', initialPassword);
-
+    // Create new student with registration number as password
     const student = new User({
       name,
       email: email.toLowerCase(),
       regNumber,
-      password: initialPassword,
+      password: regNumber, // Let the pre-save middleware handle hashing
       role: 'student',
       isVerified: true
     });
 
-    // Save the student and wait for the middleware to hash the password
     await student.save();
-    console.log('Student created with hashed password');
+    console.log('Student created successfully:', {
+      email,
+      regNumber
+    });
     
     // Send welcome email
     try {
@@ -683,7 +677,7 @@ router.post('/students', auth, isFaculty, async (req, res) => {
         name,
         email: email.toLowerCase(),
         regNumber,
-        password: initialPassword, // Send the plain text password in the email
+        password: regNumber,
         loginUrl: process.env.FRONTEND_URL || 'http://localhost:5173'
       });
     } catch (emailError) {
