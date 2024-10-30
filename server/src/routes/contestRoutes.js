@@ -1,118 +1,97 @@
 const express = require('express');
 const router = express.Router();
-const Contest = require('../models/Contest');
-const Submission = require('../models/Submission');
 const { auth } = require('../middleware/auth');
-const { isFaculty } = require('../middleware/faculty');
+const Contest = require('../models/Contest');
 
 // Get all contests
 router.get('/', auth, async (req, res) => {
   try {
     const contests = await Contest.find()
-      .populate('createdBy', 'name email')
-      .populate('problems.problem', 'title difficulty points')
-      .populate('participants', 'name regNumber')
-      .sort('-createdAt');
-    
-    console.log('Fetched contests:', contests);
-    res.json(contests);
-  } catch (error) {
-    console.error('Error fetching contests:', error);
-    res.status(500).json({ message: 'Failed to fetch contests' });
-  }
-});
+      .populate('problems.problem', 'title difficulty')
+      .populate('participants.user', '_id name')
+      .sort('-createdAt')
+      .lean();
 
-// Create new contest
-router.post('/', auth, isFaculty, async (req, res) => {
-  try {
-    console.log('Creating contest with data:', req.body);
-
-    const contest = new Contest({
-      title: req.body.title,
-      description: req.body.description,
-      startTime: req.body.startTime,
-      duration: req.body.duration,
-      problems: req.body.problems.map(p => ({
-        problem: p.problemId,
-        points: parseInt(p.points)
-      })),
-      createdBy: req.user._id
-    });
-
-    const newContest = await contest.save();
-    const populatedContest = await Contest.findById(newContest._id)
-      .populate('createdBy', 'name email')
-      .populate('problems.problem', 'title difficulty points')
-      .populate('participants', 'name regNumber');
-
-    console.log('Saved contest:', populatedContest);
-    res.status(201).json(populatedContest);
-  } catch (error) {
-    console.error('Contest creation error:', error);
-    res.status(400).json({ message: error.message });
-  }
-});
-
-// Update contest
-router.put('/:id', auth, isFaculty, async (req, res) => {
-  try {
-    const contest = await Contest.findById(req.params.id);
-    if (!contest) {
-      return res.status(404).json({ message: 'Contest not found' });
-    }
-
-    contest.title = req.body.title;
-    contest.description = req.body.description;
-    contest.startTime = req.body.startTime;
-    contest.duration = req.body.duration;
-    contest.problems = req.body.problems.map(p => ({
-      problem: p.problemId,
-      points: parseInt(p.points)
+    // Add user registration status to each contest
+    const contestsWithStatus = contests.map(contest => ({
+      ...contest,
+      isRegistered: contest.participants.some(p => 
+        p.user._id.toString() === req.user.id.toString()
+      )
     }));
 
-    const updatedContest = await contest.save();
-    const populatedContest = await Contest.findById(updatedContest._id)
-      .populate('createdBy', 'name email')
-      .populate('problems.problem', 'title difficulty')
-      .populate('participants', 'name regNumber');
-
-    res.json(populatedContest);
+    res.json(contestsWithStatus);
   } catch (error) {
-    console.error('Contest update error:', error);
-    res.status(400).json({ message: error.message });
+    console.error('Error fetching contests:', error);
+    res.status(500).json({ message: 'Error fetching contests' });
   }
 });
 
-// Delete contest
-router.delete('/:id', auth, isFaculty, async (req, res) => {
-  try {
-    const contest = await Contest.findByIdAndDelete(req.params.id);
-    if (!contest) {
-      return res.status(404).json({ message: 'Contest not found' });
-    }
-    res.json({ message: 'Contest deleted successfully' });
-  } catch (error) {
-    console.error('Delete contest error:', error);
-    res.status(500).json({ message: error.message });
-  }
-});
-
-// Get single contest with populated problems
+// Get single contest details
 router.get('/:id', auth, async (req, res) => {
   try {
     const contest = await Contest.findById(req.params.id)
-      .populate('createdBy', 'name email')
-      .populate('problems.problem', 'title difficulty points')
-      .populate('participants', 'name regNumber');
+      .populate('problems.problem', 'title difficulty')
+      .lean();
     
     if (!contest) {
       return res.status(404).json({ message: 'Contest not found' });
     }
-    
+
     res.json(contest);
   } catch (error) {
     console.error('Error fetching contest:', error);
-    res.status(500).json({ message: error.message });
+    res.status(500).json({ message: 'Error fetching contest' });
+  }
+});
+
+// Join contest route
+router.post('/:id/join', auth, async (req, res) => {
+  try {
+    const contest = await Contest.findById(req.params.id);
+    
+    if (!contest) {
+      return res.status(404).json({ message: 'Contest not found' });
+    }
+
+    // Check if user already joined
+    const alreadyJoined = contest.participants.some(
+      participant => participant.user.toString() === req.user.id
+    );
+
+    if (alreadyJoined) {
+      return res.status(400).json({ message: 'Already joined this contest' });
+    }
+
+    // Check if contest has started
+    const now = new Date();
+    const startTime = new Date(contest.startTime);
+    const endTime = new Date(startTime.getTime() + contest.duration * 60000);
+
+    if (now > endTime) {
+      return res.status(400).json({ message: 'Contest has already ended' });
+    }
+
+    // Add user to participants
+    const newParticipant = {
+      user: req.user.id,
+      joinedAt: new Date(),
+      submissions: []
+    };
+
+    contest.participants.push(newParticipant);
+    await contest.save();
+
+    res.json({ 
+      message: 'Successfully joined contest',
+      contestId: contest._id,
+      startTime: contest.startTime,
+      duration: contest.duration
+    });
+
+  } catch (error) {
+    console.error('Error joining contest:', error);
+    res.status(500).json({ message: 'Error joining contest' });
   }
 });
 
@@ -120,79 +99,84 @@ router.get('/:id', auth, async (req, res) => {
 router.get('/:id/leaderboard', auth, async (req, res) => {
   try {
     const contest = await Contest.findById(req.params.id)
-      .populate('problems', 'title points');
+      .populate('problems')
+      .populate({
+        path: 'submissions',
+        populate: [
+          { path: 'student', select: 'name' },
+          { path: 'problem', select: 'title points' }
+        ]
+      });
     
     if (!contest) {
       return res.status(404).json({ message: 'Contest not found' });
     }
 
-    // Get all submissions for this contest
-    const submissions = await Submission.find({
-      contest: req.params.id
-    }).populate('student', 'name regNumber');
-
-    // Calculate leaderboard data
-    const leaderboardMap = new Map();
-
-    submissions.forEach(submission => {
+    // Process submissions to create leaderboard
+    const participantScores = {};
+    
+    contest.submissions.forEach(submission => {
       const studentId = submission.student._id.toString();
-      
-      if (!leaderboardMap.has(studentId)) {
-        leaderboardMap.set(studentId, {
-          student: submission.student,
-          problemsSolved: 0,
-          totalPoints: 0,
-          totalTime: 0,
-          submissions: new Set()
-        });
+      if (!participantScores[studentId]) {
+        participantScores[studentId] = {
+          user: submission.student,
+          score: 0,
+          submissions: 0
+        };
       }
-
-      const studentData = leaderboardMap.get(studentId);
       
-      if (submission.status === 'Accepted' && !studentData.submissions.has(submission.problem.toString())) {
-        studentData.problemsSolved++;
-        studentData.totalPoints += submission.points;
-        studentData.totalTime += submission.executionTime;
-        studentData.submissions.add(submission.problem.toString());
+      if (submission.status === 'Accepted') {
+        participantScores[studentId].score += submission.problem.points || 0;
       }
+      participantScores[studentId].submissions += 1;
     });
 
-    // Convert map to array and sort
-    const leaderboard = Array.from(leaderboardMap.values())
-      .sort((a, b) => {
-        if (b.totalPoints !== a.totalPoints) return b.totalPoints - a.totalPoints;
-        if (b.problemsSolved !== a.problemsSolved) return b.problemsSolved - a.problemsSolved;
-        return a.totalTime - b.totalTime;
-      });
+    const leaderboard = Object.values(participantScores)
+      .sort((a, b) => b.score - a.score);
 
-    res.json({
-      contest,
-      leaderboard
-    });
+    res.json(leaderboard);
   } catch (error) {
-    console.error('Leaderboard error:', error);
+    console.error('Error fetching contest leaderboard:', error);
     res.status(500).json({ message: 'Error fetching leaderboard' });
   }
 });
 
-// Get student submissions for a contest
-router.get('/:id/submissions/:studentId', auth, async (req, res) => {
+// Get all contests (for faculty)
+router.get('/faculty/contests', auth, async (req, res) => {
   try {
-    const submissions = await Submission.find({
-      contest: req.params.id,
-      student: req.params.studentId
-    })
-    .populate('problem', 'title')
-    .populate('student', 'name regNumber')
-    .sort('-submittedAt');
+    const contests = await Contest.find()
+      .populate('problems', 'title points')
+      .populate('createdBy', 'name')
+      .populate('participants.user', 'name')
+      .sort('-createdAt')
+      .lean();
 
-    res.json({
-      submissions,
-      student: submissions[0]?.student || null
-    });
+    res.json(contests);
   } catch (error) {
-    console.error('Submissions error:', error);
-    res.status(500).json({ message: 'Error fetching submissions' });
+    console.error('Error fetching contests:', error);
+    res.status(500).json({ message: 'Error fetching contests' });
+  }
+});
+
+// Create contest (for faculty)
+router.post('/faculty/contests', auth, async (req, res) => {
+  try {
+    const { title, description, startTime, duration, problems } = req.body;
+    
+    const contest = new Contest({
+      title,
+      description,
+      startTime,
+      duration,
+      problems,
+      createdBy: req.user.id
+    });
+
+    await contest.save();
+    res.status(201).json(contest);
+  } catch (error) {
+    console.error('Error creating contest:', error);
+    res.status(500).json({ message: 'Error creating contest' });
   }
 });
 

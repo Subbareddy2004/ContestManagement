@@ -38,6 +38,10 @@ const problemSchema = new mongoose.Schema({
   memoryLimit: {
     type: Number,
     default: 256 // MB
+  },
+  tags: {
+    type: [String],
+    default: []
   }
 }, {
   timestamps: true

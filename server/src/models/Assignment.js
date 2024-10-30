@@ -8,7 +8,7 @@ const assignmentSchema = new mongoose.Schema({
   },
   description: {
     type: String,
-    trim: true
+    required: true
   },
   dueDate: {
     type: Date,
@@ -16,8 +16,7 @@ const assignmentSchema = new mongoose.Schema({
   },
   problems: [{
     type: mongoose.Schema.Types.ObjectId,
-    ref: 'Problem',
-    required: true
+    ref: 'Problem'
   }],
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
@@ -25,8 +24,34 @@ const assignmentSchema = new mongoose.Schema({
     required: true
   },
   submissions: [{
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'Submission'
+    student: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      required: true
+    },
+    submittedAt: {
+      type: Date,
+      default: Date.now
+    },
+    code: {
+      type: String,
+      required: true
+    },
+    language: {
+      type: String,
+      required: true
+    },
+    status: {
+      type: String,
+      enum: ['Pending', 'Graded'],
+      default: 'Pending'
+    },
+    grade: {
+      type: Number,
+      min: 0,
+      max: 100
+    },
+    feedback: String
   }]
 }, {
   timestamps: true

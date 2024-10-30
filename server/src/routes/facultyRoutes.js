@@ -168,39 +168,28 @@ router.get('/assignments', auth, isFaculty, async (req, res) => {
 // Create new assignment
 router.post('/assignments', auth, isFaculty, async (req, res) => {
   try {
-    const assignmentData = {
-      ...req.body,
-      createdBy: req.user.id
-    };
+    const { title, description, dueDate, problems } = req.body;
 
     // Validate required fields
-    if (!assignmentData.title || !assignmentData.dueDate || !assignmentData.problems?.length) {
-      return res.status(400).json({
-        message: 'Missing required fields',
-        required: ['title', 'dueDate', 'problems']
+    if (!title || !description || !dueDate || !problems) {
+      return res.status(400).json({ 
+        message: 'Missing required fields. Please provide title, description, dueDate, and problems.' 
       });
     }
 
-    // Verify all problems exist and belong to the faculty
-    const problems = await Problem.find({
-      _id: { $in: assignmentData.problems },
+    const assignment = new Assignment({
+      title,
+      description,
+      dueDate,
+      problems,
       createdBy: req.user.id
     });
 
-    if (problems.length !== assignmentData.problems.length) {
-      return res.status(400).json({ message: 'One or more problems are invalid' });
-    }
-
-    const assignment = new Assignment(assignmentData);
     await assignment.save();
-    
-    const populatedAssignment = await Assignment.findById(assignment._id)
-      .populate('problems');
-    
-    res.status(201).json(populatedAssignment);
+    res.status(201).json(assignment);
   } catch (error) {
-    console.error('Error creating assignment:', error);
-    res.status(500).json({ message: 'Error creating assignment' });
+    console.warn('Error creating assignment:', error);
+    res.status(500).json({ message: 'Error creating assignment', error: error.message });
   }
 });
 
